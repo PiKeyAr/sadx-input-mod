@@ -23,18 +23,70 @@ enum Motor : int8
 	both
 };
 
+enum PadItemType
+{
+	PadItemType_Button = 0,
+	PadItemType_Axis = 1,
+	//PadItemType_KeyboardKey = 2,
+};
+
+struct PadConfigItem 
+{
+	int type;
+	int index;
+	int direction;
+};
+
+struct FullConfig_Pad
+{
+	Uint32 DeadzoneL;
+	Uint32 DeadzoneR;
+	bool RadialL;
+	bool RadialR;
+	int TriggerThreshold;
+	float RumbleFactor;
+	bool MegaRumble;
+	int RumbleMinTime;
+	PadConfigItem s0_up;
+	PadConfigItem s0_down;
+	PadConfigItem s0_left;
+	PadConfigItem s0_right;
+	PadConfigItem s1_up;
+	PadConfigItem s1_down;
+	PadConfigItem s1_left;
+	PadConfigItem s1_right;
+	PadConfigItem start;
+	PadConfigItem a;
+	PadConfigItem b;
+	PadConfigItem x;
+	PadConfigItem y;
+	PadConfigItem lt;
+	PadConfigItem rt;
+	PadConfigItem z;
+	PadConfigItem c;
+	PadConfigItem d;
+	PadConfigItem e;
+	PadConfigItem h;
+	PadConfigItem dpad_up;
+	PadConfigItem dpad_down;
+	PadConfigItem dpad_left;
+	PadConfigItem dpad_right;
+	bool dpad_camera;
+};
+
 class DreamPad
 {
 	static KeyboardMouse keyboard;
-
 	ControllerData dc_pad = {};
 
 	SDL_GameController* gamepad = nullptr;
+	SDL_Joystick*		joystick = nullptr;
 	SDL_Haptic*         haptic  = nullptr;
 	SDL_HapticEffect    effect  = {};
 
 	int controller_id_ = -1;
 	int effect_id      = -1;
+	int numaxes = 0;
 
 	bool  connected_   = false;
 	Motor rumble_state = Motor::none;
@@ -106,7 +158,7 @@ public:
 	 * \param radial If set to \a true, the deadzone is treated as fully radial. (i.e one axis exceeding deadzone implies the other)
 	 * \return The axis magnitude.
 	 */
-	static float convert_axes(NJS_POINT2I* dest, const NJS_POINT2I& source, short deadzone, bool radial);
+	static float convert_axes(NJS_POINT2I* dest, const NJS_POINT2I& source, short deadzone, bool radial, int direction_x, int direction_y);
 
 	/**
 	 * \brief Updates the various button fields in the provided

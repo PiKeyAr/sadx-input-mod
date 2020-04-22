@@ -5,6 +5,8 @@
 
 #include "DreamPad.h"
 
+bool e_key[9];
+
 static const Uint32 PAD_SUPPORT =
 	PDD_DEV_SUPPORT_TA | PDD_DEV_SUPPORT_TB | PDD_DEV_SUPPORT_TX | PDD_DEV_SUPPORT_TY | PDD_DEV_SUPPORT_ST
 	#ifdef EXTENDED_BUTTONS
@@ -44,17 +46,15 @@ bool DreamPad::open(int id)
 		close();
 	}
 
-	gamepad = SDL_GameControllerOpen(id);
+	joystick = SDL_JoystickOpen(id);
 
-	if (gamepad == nullptr)
+	if (joystick == nullptr)
 	{
 		connected_ = false;
 		return false;
 	}
 
 	dc_pad.Support = PAD_SUPPORT;
-
-	SDL_Joystick* joystick = SDL_GameControllerGetJoystick(gamepad);
 
 	if (joystick == nullptr)
 	{
@@ -64,6 +64,8 @@ bool DreamPad::open(int id)
 
 	controller_id_ = id;
 	haptic = SDL_HapticOpenFromJoystick(joystick);
+	numaxes = SDL_JoystickNumAxes(joystick);
+	PrintDebug("Controller %d axes: %d\n", controller_id_, numaxes);
 
 	if (haptic == nullptr)
 	{
@@ -103,27 +105,82 @@ void DreamPad::close()
 		haptic = nullptr;
 	}
 
-	if (gamepad != nullptr)
+	if (joystick != nullptr)
 	{
-		SDL_GameControllerClose(gamepad);
-		gamepad = nullptr;
+		SDL_JoystickClose(joystick);
+		joystick = nullptr;
 	}
 
 	controller_id_ = -1;
 	connected_ = false;
 }
 
+__int16 GetAxis(PadConfigItem* item, int direction, SDL_Joystick* joystick)
+{
+	//Real axes
+	if (item->type == PadItemType_Axis)
+	{
+		if (direction == -1) return min((__int16)0, SDL_JoystickGetAxis(joystick, item->index));
+		else return max((__int16)0, SDL_JoystickGetAxis(joystick, item->index));
+	}
+	//Button axes
+	else
+	{
+		if (SDL_JoystickGetButton(joystick, item->index)) return -32767 * direction; else return 0;
+	}
+}
+
+Uint8 GetButton(PadConfigItem* item, SDL_Joystick* joystick)
+{
+	//PrintDebug("Button pressedL %d\n", SDL_JoystickGetButton(joystick, 6));
+	Uint8 result;
+	//Axes
+	if (item->type == PadItemType_Axis)
+	{
+		if (item->direction == 1)
+		{
+			if (SDL_JoystickGetAxis(joystick, item->index) > 8000) result = 1; else result = 0;
+		}
+		else
+		{
+			if (SDL_JoystickGetAxis(joystick, item->index) < -8000) result = 1; else result = 0;
+		}
+	}
+	//Buttons
+	else
+	{
+		//PrintDebug("item %d, %d\n", item->index, SDL_JoystickGetButton(joystick, item->index));
+		result = SDL_JoystickGetButton(joystick, item->index);
+	}
+	return result;
+}
+
 void DreamPad::poll()
 {
+	NJS_POINT2I axis;
+	Sint16 axis_up;
+	Sint16 axis_down;
+	Sint16 axis_left;
+	Sint16 axis_right;
+	int dir_y;
+	int dir_x;
+	bool half_press = false;
+
 	if (!connected_ && !settings.allow_keyboard)
 	{
 		return;
 	}
-
 	// TODO: keyboard/mouse toggle
 	auto& kb = KeyboardMouse::dreamcast_data();
 	bool allow_keyboard = settings.allow_keyboard;
 
+	//Half-press
+	if (connected_ && GetButton(&PlayerConfigs[controller_id_ + 2].h, joystick))
+	{
+		half_press = true;
+	}
+
+	//Stick 0
 	if (!connected_ || (allow_keyboard && (kb.LeftStickX || kb.LeftStickY)))
 	{
 		normalized_l_ = KeyboardMouse::normalized_l();
@@ -132,15 +189,21 @@ void DreamPad::poll()
 	}
 	else
 	{
-		NJS_POINT2I axis = {
-			axis.x = SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_LEFTX),
-			axis.y = SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_LEFTY)
-		};
-
-		normalized_l_ = convert_axes(reinterpret_cast<NJS_POINT2I*>(&dc_pad.LeftStickX), axis, settings.deadzone_l,
-		                             settings.radial_l);
+		//Get axes for stick 0
+		axis_up = GetAxis(&PlayerConfigs[controller_id_ + 2].s0_up, -1, joystick);
+		axis_down = GetAxis(&PlayerConfigs[controller_id_ + 2].s0_down, 1, joystick);
+		axis_left = GetAxis(&PlayerConfigs[controller_id_ + 2].s0_left, -1, joystick);
+		axis_right = GetAxis(&PlayerConfigs[controller_id_ + 2].s0_right, 1, joystick);
+		//Combine axes for stick 0
+		axis.x = axis_left + axis_right;
+		axis.y = axis_up + axis_down;
+		//PrintDebug("Stick 0 Up %d, Down %d, Left %d, Right %d\n", axis_up, axis_down, axis_left, axis_right);
+		//Normalize stick 0
+		if (PlayerConfigs[controller_id_ + 2].s0_up.direction == -1 && PlayerConfigs[controller_id_ + 2].s0_down.direction == 1) dir_y = 1; else dir_y = -1;
+		if (PlayerConfigs[controller_id_ + 2].s0_left.direction == -1 && PlayerConfigs[controller_id_ + 2].s0_right.direction == 1) dir_x = 1; else dir_x = -1;
+		normalized_l_ = convert_axes(reinterpret_cast<NJS_POINT2I*>(&dc_pad.LeftStickX), axis, settings.deadzone_l, settings.radial_l, dir_x, dir_y);
 	}
-
+	//Stick 1
 	if (!connected_ || (allow_keyboard && (kb.RightStickX || kb.RightStickY)))
 	{
 		normalized_r_ = KeyboardMouse::normalized_r();
@@ -149,38 +212,53 @@ void DreamPad::poll()
 	}
 	else
 	{
-		NJS_POINT2I axis = {
-			axis.x = SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_RIGHTX),
-			axis.y = SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_RIGHTY)
-		};
-
-		normalized_r_ = convert_axes(reinterpret_cast<NJS_POINT2I*>(&dc_pad.RightStickX), axis, settings.deadzone_r,
-		                             settings.radial_r);
+		//Get axes for stick 1
+		axis_up = GetAxis(&PlayerConfigs[controller_id_ + 2].s1_up, -1, joystick);
+		axis_down = GetAxis(&PlayerConfigs[controller_id_ + 2].s1_down, 1, joystick);
+		axis_left = GetAxis(&PlayerConfigs[controller_id_ + 2].s1_left, -1, joystick);
+		axis_right = GetAxis(&PlayerConfigs[controller_id_ + 2].s1_right, 1, joystick);
+		//Combine axes for stick 1
+		axis.x = axis_left + axis_right;
+		axis.y = axis_up + axis_down;
+		//PrintDebug("Stick 1 Up %d, Down %d, Left %d, Right %d\n", axis_up, axis_down, axis_left, axis_right);
+		if (PlayerConfigs[controller_id_ + 2].s1_up.direction == -1 && PlayerConfigs[controller_id_ + 2].s1_down.direction == 1) dir_y = 1; else dir_y = -1;
+		if (PlayerConfigs[controller_id_ + 2].s1_left.direction == -1 && PlayerConfigs[controller_id_ + 2].s1_right.direction == 1) dir_x = 1; else dir_x = -1;
+		normalized_r_ = convert_axes(reinterpret_cast<NJS_POINT2I*>(&dc_pad.RightStickX), axis, settings.deadzone_r, settings.radial_r, dir_x, dir_y);
+		DisplayDebugStringFormatted(NJM_LOCATION(0, 0), "Axis 0: %d, Axis 1: %d, Axis 2: %d, Axis 4:%d", SDL_JoystickGetAxis(joystick, 0), SDL_JoystickGetAxis(joystick, 1), SDL_JoystickGetAxis(joystick, 2), SDL_JoystickGetAxis(joystick, 3));
+		DisplayDebugStringFormatted(NJM_LOCATION(0, 1), "Axis 4: %d, Axis 5: %d, Axis 6: %d, Axis 7:%d", SDL_JoystickGetAxis(joystick, 4), SDL_JoystickGetAxis(joystick, 5), SDL_JoystickGetAxis(joystick, 6), SDL_JoystickGetAxis(joystick, 7));
 	}
-
+	if (half_press)
+	{
+		dc_pad.LeftStickX /= 2;
+		dc_pad.LeftStickY /= 2;
+		dc_pad.RightStickX /= 2;
+		dc_pad.RightStickY /= 2;
+		normalized_l_ /= 2.0f;
+		normalized_r_ /= 2.0f;
+	}
 	constexpr short short_max = std::numeric_limits<short>::max();
-
+	//Left trigger
 	if (!connected_ || (allow_keyboard && kb.LTriggerPressure))
 	{
 		dc_pad.LTriggerPressure = kb.LTriggerPressure;
 	}
 	else
 	{
-		auto lt = SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
+		auto lt = GetAxis(&PlayerConfigs[controller_id_ + 2].lt, 1, joystick);
 		dc_pad.LTriggerPressure = static_cast<short>(255.0f * (static_cast<float>(lt) / static_cast<float>(short_max)));
 	}
-
+	//Right trigger
 	if (!connected_ || (allow_keyboard && kb.RTriggerPressure))
 	{
 		dc_pad.RTriggerPressure = kb.RTriggerPressure;
 	}
 	else
 	{
-		auto rt = SDL_GameControllerGetAxis(gamepad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
+		auto rt = GetAxis(&PlayerConfigs[controller_id_ + 2].rt, 1, joystick);
 		dc_pad.RTriggerPressure = static_cast<short>(255.0f * (static_cast<float>(rt) / static_cast<float>(short_max)));
 	}
 
-
+	//Buttons
 	Uint32 buttons = 0;
 
 	buttons |= digital_trigger(dc_pad.LTriggerPressure, settings.trigger_threshold, Buttons_L);
@@ -188,58 +266,68 @@ void DreamPad::poll()
 
 	if (connected_)
 	{
-		if (SDL_GameControllerGetButton(gamepad, SDL_CONTROLLER_BUTTON_A))
+		if (!DemoPlaying)
 		{
-			buttons |= Buttons_A;
+			if (GetButton(&PlayerConfigs[controller_id_ + 2].a, joystick))
+			{
+				buttons |= Buttons_A;
+			}
+			if (GetButton(&PlayerConfigs[controller_id_ + 2].b, joystick))
+			{
+				buttons |= Buttons_B;
+			}
+			if (GetButton(&PlayerConfigs[controller_id_ + 2].x, joystick))
+			{
+				buttons |= Buttons_X;
+			}
+			if (GetButton(&PlayerConfigs[controller_id_ + 2].y, joystick))
+			{
+				buttons |= Buttons_Y;
+			}
 		}
-		if (SDL_GameControllerGetButton(gamepad, SDL_CONTROLLER_BUTTON_B))
-		{
-			buttons |= Buttons_B;
-		}
-		if (SDL_GameControllerGetButton(gamepad, SDL_CONTROLLER_BUTTON_X))
-		{
-			buttons |= Buttons_X;
-		}
-		if (SDL_GameControllerGetButton(gamepad, SDL_CONTROLLER_BUTTON_Y))
-		{
-			buttons |= Buttons_Y;
-		}
-
-		if (SDL_GameControllerGetButton(gamepad, SDL_CONTROLLER_BUTTON_START))
+		if (GetButton(&PlayerConfigs[controller_id_ + 2].start, joystick))
 		{
 			buttons |= Buttons_Start;
 		}
 
 #ifdef EXTENDED_BUTTONS
-		if (SDL_GameControllerGetButton(gamepad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER))
+		if (GetButton(&PlayerConfigs[controller_id_ + 2].c, joystick))
 		{
 			buttons |= Buttons_C;
 		}
-		if (SDL_GameControllerGetButton(gamepad, SDL_CONTROLLER_BUTTON_BACK))
+		if (GetButton(&PlayerConfigs[controller_id_ + 2].d, joystick))
 		{
 			buttons |= Buttons_D;
 		}
-		if (SDL_GameControllerGetButton(gamepad, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER))
+		if (GetButton(&PlayerConfigs[controller_id_ + 2].z, joystick))
 		{
 			buttons |= Buttons_Z;
 		}
+		if (GetButton(&PlayerConfigs[controller_id_ + 2].e, joystick))
+		{
+			e_key[controller_id_ + 2] = true;
+		}
 #endif
 
-		if (SDL_GameControllerGetButton(gamepad, SDL_CONTROLLER_BUTTON_DPAD_UP))
+		if (GetButton(&PlayerConfigs[controller_id_ + 2].dpad_up, joystick))
 		{
 			buttons |= Buttons_Up;
+			if (PlayerConfigs[controller_id_ + 2].dpad_camera) dc_pad.RightStickY = -127;
 		}
-		if (SDL_GameControllerGetButton(gamepad, SDL_CONTROLLER_BUTTON_DPAD_DOWN))
+		if (GetButton(&PlayerConfigs[controller_id_ + 2].dpad_down, joystick))
 		{
 			buttons |= Buttons_Down;
+			if (PlayerConfigs[controller_id_ + 2].dpad_camera) dc_pad.RightStickY = 127;
 		}
-		if (SDL_GameControllerGetButton(gamepad, SDL_CONTROLLER_BUTTON_DPAD_LEFT))
+		if (GetButton(&PlayerConfigs[controller_id_ + 2].dpad_left, joystick))
 		{
 			buttons |= Buttons_Left;
+			if (PlayerConfigs[controller_id_ + 2].dpad_camera) dc_pad.RightStickX = -127;
 		}
-		if (SDL_GameControllerGetButton(gamepad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT))
+		if (GetButton(&PlayerConfigs[controller_id_ + 2].dpad_right, joystick))
 		{
 			buttons |= Buttons_Right;
+			if (PlayerConfigs[controller_id_ + 2].dpad_camera) dc_pad.RightStickX = 127;
 		}
 	}
 
@@ -247,7 +335,7 @@ void DreamPad::poll()
 	{
 		buttons |= kb.HeldButtons;
 	}
-
+	
 	update_buttons(dc_pad, buttons);
 }
 
@@ -311,7 +399,7 @@ void DreamPad::set_active_motor(Motor motor, bool enable)
 	SDL_HapticRunEffect(haptic, effect_id, 1);
 }
 
-float DreamPad::convert_axes(NJS_POINT2I* dest, const NJS_POINT2I& source, short deadzone, bool radial)
+float DreamPad::convert_axes(NJS_POINT2I* dest, const NJS_POINT2I& source, short deadzone, bool radial, int direction_x, int direction_y)
 {
 	if (abs(source.x) < deadzone && abs(source.y) < deadzone)
 	{
@@ -321,8 +409,8 @@ float DreamPad::convert_axes(NJS_POINT2I* dest, const NJS_POINT2I& source, short
 
 	constexpr short short_max = std::numeric_limits<short>::max();
 
-	const auto x = static_cast<float>(clamp<short>(source.x, -short_max, short_max));
-	const auto y = static_cast<float>(clamp<short>(source.y, -short_max, short_max));
+	const auto x = direction_x * static_cast<float>(clamp<short>(source.x, -short_max, short_max));
+	const auto y = direction_y * static_cast<float>(clamp<short>(source.y, -short_max, short_max));
 
 	const float m = sqrt(x * x + y * y);
 
@@ -362,7 +450,7 @@ void DreamPad::update_buttons(ControllerData& pad, Uint32 buttons)
 
 void DreamPad::move_from(DreamPad&& other)
 {
-	gamepad        = other.gamepad;
+	joystick        = other.joystick;
 	haptic         = other.haptic;
 	effect         = other.effect;
 	controller_id_ = other.controller_id_;
@@ -373,7 +461,7 @@ void DreamPad::move_from(DreamPad&& other)
 	normalized_r_  = other.normalized_r_;
 	settings       = other.settings;
 
-	other.gamepad        = nullptr;
+	other.joystick        = nullptr;
 	other.haptic         = nullptr;
 	other.controller_id_ = -1;
 	other.effect_id      = -1;
